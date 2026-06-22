@@ -1,0 +1,9 @@
+.DS_Store
+SecurePassEngine/.build/
+SecurePassAndroid/.gradle/
+SecurePassAndroid/.kotlin/
+SecurePassAndroid/app/build/
+SecurePassAndroid/app/.cxx/
+SecurePassAndroid/local.properties
+SecurePassAndroid/build/
+SecurePassAndroid/app/src/main/jniLibs/
