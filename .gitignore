@@ -7,3 +7,6 @@ SecurePassAndroid/app/.cxx/
 SecurePassAndroid/local.properties
 SecurePassAndroid/build/
 SecurePassAndroid/app/src/main/jniLibs/
+SecurePassBackend/node_modules/
+SecurePassBackend/dist/
+SecurePassBackend/.env
