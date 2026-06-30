@@ -1,9 +1,10 @@
-package com.nejracoric.securepassandroid.ui
+package com.nejracoric.securepassandroid.ui.generator
 
 import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.nejracoric.securepassandroid.data.repository.VaultRepository
 import com.nejracoric.securepassandroid.native.SecurePassNative
 import com.nejracoric.securepassandroid.security.NetworkUtils
 import com.nejracoric.securepassandroid.security.PwnedNetworkDiagnostics
@@ -24,31 +25,41 @@ import java.io.IOException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 
-data class PasswordUiState(
+data class GeneratorUiState(
     val password: String = "",
-    val length: Int = 16,
+    val length: Int = 20,
+    val includeUppercase: Boolean = true,
+    val includeLowercase: Boolean = true,
+    val includeNumbers: Boolean = true,
     val includeSpecialChars: Boolean = true,
     val entropyBits: Double = 0.0,
-    val savedPasswords: List<String> = emptyList(),
-    val averageSessionEntropy: Double = 0.0,
     val pwnedCount: Int = 0,
     val isCheckingPwned: Boolean = false,
     val pwnedCheckFailed: Boolean = false,
     val pwnedCheckFailedMessage: String? = null,
     val errorMessage: String? = null,
-)
+    val showSaveSheet: Boolean = false,
+    val saveTitle: String = "",
+    val saveUsername: String = "",
+    val isSaving: Boolean = false,
+    val saveSuccess: Boolean = false,
+) {
+    val securityProgress: Float
+        get() = (entropyBits / 100.0).coerceIn(0.0, 1.0).toFloat()
+}
 
-class PasswordViewModel(
+class GeneratorViewModel(
     application: Application,
 ) : AndroidViewModel(application) {
 
-    private val _uiState = MutableStateFlow(PasswordUiState())
-    val uiState: StateFlow<PasswordUiState> = _uiState.asStateFlow()
+    private val vaultRepository = VaultRepository()
+    private val _uiState = MutableStateFlow(GeneratorUiState())
+    val uiState: StateFlow<GeneratorUiState> = _uiState.asStateFlow()
 
     private var pwnedCheckJob: Job? = null
 
     companion object {
-        private const val TAG = "PasswordViewModel"
+        private const val TAG = "GeneratorViewModel"
     }
 
     fun setLength(length: Int) {
@@ -59,12 +70,25 @@ class PasswordViewModel(
         _uiState.update { it.copy(includeSpecialChars = enabled) }
     }
 
+    fun setIncludeUppercase(enabled: Boolean) {
+        _uiState.update { it.copy(includeUppercase = enabled) }
+    }
+
+    fun setIncludeLowercase(enabled: Boolean) {
+        _uiState.update { it.copy(includeLowercase = enabled) }
+    }
+
+    fun setIncludeNumbers(enabled: Boolean) {
+        _uiState.update { it.copy(includeNumbers = enabled) }
+    }
+
     fun setPassword(password: String) {
         _uiState.update {
             it.copy(
                 password = password,
                 entropyBits = SecurePassNative.calculateEntropy(password),
                 errorMessage = null,
+                saveSuccess = false,
             )
         }
         checkPwnedStatus(password)
@@ -73,9 +97,7 @@ class PasswordViewModel(
     fun generatePassword() {
         val state = _uiState.value
         SecurePassNative.generatePassword(state.length, state.includeSpecialChars)
-            .onSuccess { password ->
-                setPassword(password)
-            }
+            .onSuccess { password -> setPassword(password) }
             .onFailure { error ->
                 _uiState.update { it.copy(errorMessage = error.message) }
             }
@@ -85,19 +107,59 @@ class PasswordViewModel(
         checkPwnedStatus(_uiState.value.password)
     }
 
-    fun savePasswordToList() {
-        val password = _uiState.value.password
-        if (password.isEmpty()) {
-            _uiState.update { it.copy(errorMessage = "Unesi lozinku prije čuvanja") }
+    fun showSaveSheet() {
+        if (_uiState.value.password.isEmpty()) {
+            _uiState.update { it.copy(errorMessage = "Generiši lozinku prije čuvanja") }
+            return
+        }
+        _uiState.update { it.copy(showSaveSheet = true, saveSuccess = false) }
+    }
+
+    fun dismissSaveSheet() {
+        _uiState.update {
+            it.copy(showSaveSheet = false, saveTitle = "", saveUsername = "")
+        }
+    }
+
+    fun setSaveTitle(title: String) {
+        _uiState.update { it.copy(saveTitle = title) }
+    }
+
+    fun setSaveUsername(username: String) {
+        _uiState.update { it.copy(saveUsername = username) }
+    }
+
+    fun saveToVault(onSuccess: () -> Unit) {
+        val state = _uiState.value
+        if (state.saveTitle.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "Unesi naziv platforme") }
             return
         }
 
-        val updatedList = _uiState.value.savedPasswords + password
-        _uiState.update {
-            it.copy(
-                savedPasswords = updatedList,
-                averageSessionEntropy = calculateAverageEntropy(updatedList),
-                errorMessage = null,
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSaving = true, errorMessage = null) }
+            vaultRepository.createPassword(
+                title = state.saveTitle,
+                username = state.saveUsername.ifBlank { null },
+                password = state.password,
+            ).fold(
+                onSuccess = {
+                    _uiState.update {
+                        it.copy(
+                            isSaving = false,
+                            showSaveSheet = false,
+                            saveTitle = "",
+                            saveUsername = "",
+                            saveSuccess = true,
+                        )
+                    }
+                    onSuccess()
+                },
+                onFailure = { error ->
+                    _uiState.update {
+                        it.copy(isSaving = false, errorMessage = error.message)
+                    }
+                },
             )
         }
     }
@@ -119,24 +181,16 @@ class PasswordViewModel(
 
         pwnedCheckJob = viewModelScope.launch {
             _uiState.update {
-                it.copy(
-                    isCheckingPwned = true,
-                    pwnedCheckFailed = false,
-                    pwnedCheckFailedMessage = null,
-                )
+                it.copy(isCheckingPwned = true, pwnedCheckFailed = false, pwnedCheckFailedMessage = null)
             }
 
             try {
                 delay(400)
                 ensureActive()
-
                 if (_uiState.value.password != password) return@launch
 
                 if (!NetworkUtils.isOnline(getApplication())) {
-                    failPwnedCheck(
-                        password = password,
-                        message = "Nema internetske veze. Uključi Wi-Fi ili mobilne podatke.",
-                    )
+                    failPwnedCheck(password, "Nema internetske veze. Uključi Wi-Fi ili mobilne podatke.")
                     return@launch
                 }
 
@@ -157,9 +211,7 @@ class PasswordViewModel(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                val message = withContext(Dispatchers.IO) {
-                    mapPwnedError(error)
-                }
+                val message = withContext(Dispatchers.IO) { mapPwnedError(error) }
                 failPwnedCheck(password, message)
             }
         }
@@ -167,7 +219,6 @@ class PasswordViewModel(
 
     private fun failPwnedCheck(password: String, message: String) {
         if (_uiState.value.password != password) return
-
         Log.e(TAG, "HIBP check failed: $message")
         _uiState.update {
             it.copy(
@@ -180,39 +231,21 @@ class PasswordViewModel(
     }
 
     private fun mapPwnedError(error: Exception): String {
-        Log.e(TAG, "HIBP check failed for prefix lookup", error)
-
         val networkIssue = PwnedNetworkDiagnostics.diagnose()
         when (networkIssue) {
             PwnedNetworkIssue.NoInternet ->
                 return "Nema internetske veze. Uključi Wi-Fi ili mobilne podatke."
-
             PwnedNetworkIssue.HibpBlocked ->
                 return "Mreža blokira pristup HIBP API-ju. Probaj mobilne podatke ili drugi Wi-Fi."
-
             PwnedNetworkIssue.Ok -> Unit
         }
 
         val rootCause = generateSequence<Throwable>(error) { it.cause }.last()
         return when (rootCause) {
-            is UnknownHostException ->
-                "HIBP server nije dostupan. Provjeri DNS ili mrežu."
-
-            is SocketTimeoutException ->
-                "Isteklo je vrijeme čekanja na HIBP API. Isključi VPN/proxy ili probaj drugu mrežu."
-
-            is IOException ->
-                rootCause.message ?: "Provjera protiv HIBP baze trenutno nije dostupna."
-
-            else ->
-                "Provjera protiv HIBP baze trenutno nije dostupna."
+            is UnknownHostException -> "HIBP server nije dostupan. Provjeri DNS ili mrežu."
+            is SocketTimeoutException -> "Isteklo je vrijeme čekanja na HIBP API."
+            is IOException -> rootCause.message ?: "Provjera protiv HIBP baze nije dostupna."
+            else -> "Provjera protiv HIBP baze nije dostupna."
         }
-    }
-
-    private fun calculateAverageEntropy(passwords: List<String>): Double {
-        if (passwords.isEmpty()) return 0.0
-        return passwords
-            .map { SecurePassNative.calculateEntropy(it) }
-            .average()
     }
 }
